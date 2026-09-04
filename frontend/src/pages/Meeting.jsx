@@ -28,29 +28,40 @@ function Meeting() {
   const [participantsOpen, setParticipantsOpen] = useState(false);
   const [messages, setMessages] = useState([]);
   const [participants, setParticipants] = useState([]);
-  const [socket, setSocket] = useState(null);
+  const [connStatus, setConnStatus] = useState('connecting');
 
+  const socketRef = useRef(null);
   const joinedRef = useRef(false);
   const meetingDataRef = useRef(null);
-  const socketRef = useRef(null);
+  const initDoneRef = useRef(false); // prevent double-init
 
-  const userName = user?.firstName || user?.emailAddresses?.[0]?.emailAddress?.split('@')[0] || 'Guest';
+  const userName =
+    user?.firstName ||
+    user?.emailAddresses?.[0]?.emailAddress?.split('@')[0] ||
+    'Guest';
 
-  // ─── WebRTC hook — initialized with a lazy socket ref ─────────────────────
-  // We use a stable socketProxy so useWebRTC always has the latest socket
+  // Stable socket proxy — useWebRTC can always call socket.emit
+  // even before the actual socket is assigned to socketRef
   const socketProxy = useRef({
-    emit: (...args) => socketRef.current?.emit(...args)
+    emit: (...args) => {
+      if (socketRef.current) {
+        socketRef.current.emit(...args);
+      } else {
+        console.warn('[Meeting] socket.emit called before socket ready:', args[0]);
+      }
+    }
   });
 
+  // --- WebRTC hook ---
   const {
     localStream, remoteStreams,
     isMuted, isCameraOff, isScreenSharing, mediaError,
-    initLocalStream, createOffer, handleOffer, handleAnswer, handleIceCandidate,
-    handleUserLeft, updateRemoteUser,
+    initLocalStream, createOffer, handleOffer, handleAnswer,
+    handleIceCandidate, handleUserLeft, updateRemoteUser,
     toggleMute, toggleCamera, startScreenShare, stopScreenShare, cleanup
   } = useWebRTC({ socket: socketProxy.current, meetingId });
 
-  // Stable refs to callbacks (avoid stale closures in socket listeners)
+  // Stable refs so socket callbacks always call the latest function versions
   const createOfferRef = useRef(createOffer);
   const handleOfferRef = useRef(handleOffer);
   const handleAnswerRef = useRef(handleAnswer);
@@ -65,10 +76,11 @@ function Meeting() {
   useEffect(() => { handleUserLeftRef.current = handleUserLeft; }, [handleUserLeft]);
   useEffect(() => { updateRemoteUserRef.current = updateRemoteUser; }, [updateRemoteUser]);
 
-  // ─── Initialize meeting ────────────────────────────────────────────────────
+  // --- Main initialization ---
   useEffect(() => {
     if (!userId || !meetingId) return;
-    let cancelled = false;
+    if (initDoneRef.current) return; // guard against StrictMode double-call
+    initDoneRef.current = true;
 
     const init = async () => {
       try {
@@ -76,43 +88,58 @@ function Meeting() {
         const token = await getToken();
         const mkToken = () => Promise.resolve(token);
 
-        // 1. Fetch meeting
+        // 1. Fetch & validate meeting
         const { meeting } = await meetingApi.get(mkToken, meetingId);
         if (!meeting) throw new Error('Meeting not found');
         if (meeting.status === 'ended') throw new Error('This meeting has ended');
         meetingDataRef.current = meeting;
-        if (!cancelled) setMeetingData(meeting);
+        setMeetingData(meeting);
 
-        // 2. Register join
+        // 2. Register participant join in DB
         setLoadingMsg('Joining meeting...');
         await meetingApi.join(mkToken, meetingId, { userName });
 
-        // 3. Load previous messages
+        // 3. Load previous chat messages
         try {
           const { messages: prev } = await messageApi.getMessages(mkToken, meetingId);
-          if (!cancelled) setMessages(prev || []);
+          setMessages(prev || []);
         } catch (_) {}
 
-        // 4. Init local media
+        // 4. Initialize local camera + microphone
         setLoadingMsg('Setting up camera & microphone...');
         await initLocalStream();
 
-        // 5. Connect socket
-        setLoadingMsg('Connecting to room...');
+        // 5. Connect socket and wait for it to be fully connected
+        setLoadingMsg('Connecting to meeting room...');
         const s = connectSocket();
         socketRef.current = s;
-        if (!cancelled) setSocket(s);
 
-        // 6. Setup listeners
+        // Wait for socket to connect before joining room
+        await new Promise((resolve, reject) => {
+          if (s.connected) {
+            resolve();
+            return;
+          }
+          const onConnect = () => { s.off('connect_error', onError); resolve(); };
+          const onError = (err) => { s.off('connect', onConnect); reject(err); };
+          s.once('connect', onConnect);
+          s.once('connect_error', onError);
+          // Safety timeout
+          setTimeout(() => { s.off('connect', onConnect); s.off('connect_error', onError); resolve(); }, 5000);
+        });
+
+        setConnStatus('connected');
+
+        // 6. Setup all socket event listeners
         setupSocketListeners(s);
 
-        // 7. Join room
+        // 7. Join the socket room
+        console.log('[Meeting] Emitting join-room for', meetingId);
         s.emit('join-room', { meetingId, userId, userName });
         joinedRef.current = true;
 
-        if (!cancelled) setLoading(false);
+        setLoading(false);
       } catch (err) {
-        if (cancelled) return;
         console.error('[Meeting] Init error:', err);
         toast.error(err.message || 'Failed to join meeting');
         navigate('/dashboard');
@@ -120,79 +147,116 @@ function Meeting() {
     };
 
     init();
-    return () => { cancelled = true; };
+
+    return () => {
+      if (joinedRef.current) {
+        socketRef.current?.emit('leave-room', { meetingId });
+        joinedRef.current = false;
+      }
+      cleanup();
+      disconnectSocket();
+    };
   }, [userId, meetingId]);
 
-  // ─── Socket listeners ──────────────────────────────────────────────────────
+  // --- Socket event listeners ---
   const setupSocketListeners = (s) => {
-    const events = [
+    // Remove any lingering listeners first
+    [
       'existing-users','user-joined','offer','answer','ice-candidate',
       'user-left','mute-status','camera-status','screen-share-started',
       'screen-share-stopped','chat-message','participant-update',
       'removed-from-meeting','meeting-ended','error'
-    ];
-    events.forEach(e => s.off(e));
+    ].forEach(e => s.off(e));
 
+    // Existing users → new joiner creates offers for each
     s.on('existing-users', (users) => {
-      console.log('[Meeting] Existing users in room:', users.length);
-      users.forEach(u => createOfferRef.current(u.socketId, u));
+      console.log('[Meeting] Existing users in room:', users.length, users.map(u => u.userName));
+      users.forEach(u => {
+        console.log('[Meeting] Creating offer for', u.userName, u.socketId);
+        createOfferRef.current(u.socketId, u);
+      });
     });
 
     s.on('user-joined', (info) => {
+      console.log('[Meeting] user-joined:', info.userName);
       toast.info(`${info.userName} joined`, { autoClose: 2000 });
     });
 
-    s.on('offer', (data) => handleOfferRef.current(data));
-    s.on('answer', (data) => handleAnswerRef.current(data));
+    // WebRTC signaling relay
+    s.on('offer', (data) => {
+      console.log('[Meeting] Received offer from', data.from);
+      handleOfferRef.current(data);
+    });
+    s.on('answer', (data) => {
+      console.log('[Meeting] Received answer from', data.from);
+      handleAnswerRef.current(data);
+    });
     s.on('ice-candidate', (data) => handleIceCandidateRef.current(data));
 
     s.on('user-left', (data) => {
+      console.log('[Meeting] user-left:', data.userName);
       handleUserLeftRef.current(data.socketId);
       toast.info(`${data.userName || 'Participant'} left`, { autoClose: 2000 });
     });
 
+    // Media state
     s.on('mute-status', ({ socketId, isMuted }) =>
       updateRemoteUserRef.current(socketId, { isMuted }));
-
     s.on('camera-status', ({ socketId, isCameraOff }) =>
       updateRemoteUserRef.current(socketId, { isCameraOff }));
-
     s.on('screen-share-started', ({ socketId }) =>
       updateRemoteUserRef.current(socketId, { isScreenSharing: true }));
-
     s.on('screen-share-stopped', ({ socketId }) =>
       updateRemoteUserRef.current(socketId, { isScreenSharing: false }));
 
+    // Chat
     s.on('chat-message', (msg) =>
       setMessages(prev => [...prev, msg]));
 
-    s.on('participant-update', ({ participants }) =>
-      setParticipants(participants));
+    // Participants list
+    s.on('participant-update', ({ participants }) => {
+      console.log('[Meeting] participant-update:', participants.length);
+      setParticipants(participants);
+    });
 
+    // Host events
     s.on('removed-from-meeting', ({ message }) => {
       toast.error(message || 'You were removed from the meeting');
       doLeave(true);
     });
-
     s.on('meeting-ended', ({ message }) => {
       toast.info(message || 'Meeting ended by host');
       doLeave(true);
     });
-
     s.on('error', ({ message }) => toast.error(message));
+
+    // Monitor disconnections
+    s.on('disconnect', (reason) => {
+      console.warn('[Meeting] Socket disconnected:', reason);
+      setConnStatus('disconnected');
+    });
+    s.on('reconnect', () => {
+      console.log('[Meeting] Socket reconnected — rejoining room');
+      setConnStatus('connected');
+      s.emit('join-room', { meetingId, userId, userName });
+    });
   };
 
-  // ─── Send chat message ─────────────────────────────────────────────────────
+  // --- Send chat message ---
   const sendMessage = useCallback(async (text) => {
     if (!text.trim() || !socketRef.current) return;
-    socketRef.current.emit('chat-message', { meetingId, senderId: userId, senderName: userName, message: text });
+    socketRef.current.emit('chat-message', {
+      meetingId, senderId: userId, senderName: userName, message: text
+    });
     try {
       const token = await getToken();
-      await messageApi.saveMessage(() => Promise.resolve(token), { meetingId, message: text, senderName: userName });
+      await messageApi.saveMessage(() => Promise.resolve(token), {
+        meetingId, message: text, senderName: userName
+      });
     } catch (_) {}
   }, [meetingId, userId, userName, getToken]);
 
-  // ─── Leave ─────────────────────────────────────────────────────────────────
+  // --- Leave ---
   const doLeave = useCallback(async (forced = false) => {
     if (!joinedRef.current && !forced) return;
     joinedRef.current = false;
@@ -206,7 +270,7 @@ function Meeting() {
     navigate('/dashboard');
   }, [meetingId, getToken, cleanup, navigate]);
 
-  // ─── End meeting (host) ────────────────────────────────────────────────────
+  // --- End meeting (host) ---
   const handleEndMeeting = useCallback(async () => {
     try {
       const token = await getToken();
@@ -221,32 +285,22 @@ function Meeting() {
     navigate('/dashboard');
   }, [meetingId, userId, getToken, cleanup, navigate]);
 
-  // ─── Remove participant (host) ─────────────────────────────────────────────
+  // --- Remove participant (host) ---
   const handleRemoveParticipant = useCallback((targetSocketId) => {
-    socketRef.current?.emit('remove-participant', { meetingId, targetSocketId, hostUserId: userId });
+    socketRef.current?.emit('remove-participant', {
+      meetingId, targetSocketId, hostUserId: userId
+    });
   }, [meetingId, userId]);
 
-  // ─── Cleanup on unmount ────────────────────────────────────────────────────
-  useEffect(() => {
-    return () => {
-      if (joinedRef.current) {
-        socketRef.current?.emit('leave-room', { meetingId });
-        joinedRef.current = false;
-      }
-      cleanup();
-      disconnectSocket();
-    };
-  }, []);
-
-  // ─── Render ────────────────────────────────────────────────────────────────
+  // --- Render ---
   if (loading) return <Loading message={loadingMsg} />;
 
   const isHost = meetingData?.hostId === userId;
   const localUser = { userId, name: userName, isMuted, isCameraOff };
-  const connStatus = socket?.connected ? 'connected' : 'connecting';
 
   return (
     <div className="meeting-room">
+      {/* Header */}
       <div className="meeting-header">
         <div className="meeting-header-left">
           <span className="brand-icon-sm">📡</span>
@@ -256,7 +310,7 @@ function Meeting() {
         <div className="meeting-header-right">
           <div className={`connection-status ${connStatus}`}>
             <span className="status-dot" />
-            {connStatus === 'connected' ? 'Connected' : 'Connecting...'}
+            {connStatus === 'connected' ? 'Connected' : connStatus === 'disconnected' ? 'Reconnecting...' : 'Connecting...'}
           </div>
         </div>
       </div>
