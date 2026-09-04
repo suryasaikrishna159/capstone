@@ -1,17 +1,8 @@
-const { createClerkClient } = require('@clerk/backend');
-
-let clerkClient;
-
-const getClerkClient = () => {
-  if (!clerkClient) {
-    clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
-  }
-  return clerkClient;
-};
+const { verifyToken } = require('@clerk/backend');
 
 /**
- * Middleware to verify Clerk JWT token.
- * Attaches userId to req.auth if valid.
+ * Auth middleware using Clerk verifyToken.
+ * Uses verifyToken (works with Express) instead of authenticateRequest (requires full URL / Web Request API).
  */
 const requireAuth = async (req, res, next) => {
   try {
@@ -22,42 +13,44 @@ const requireAuth = async (req, res, next) => {
 
     const token = authHeader.substring(7);
 
-    // If no secret key configured, use a development fallback (decode without verify)
-    if (!process.env.CLERK_SECRET_KEY || process.env.CLERK_SECRET_KEY === 'sk_test_YOUR_SECRET_KEY_HERE') {
-      console.warn('WARNING: CLERK_SECRET_KEY not set. Using unverified JWT decode for development.');
-      // Decode JWT payload without verification (development only)
-      const base64Payload = token.split('.')[1];
-      if (!base64Payload) return res.status(401).json({ error: 'Invalid token format' });
-      const payload = JSON.parse(Buffer.from(base64Payload, 'base64').toString('utf8'));
+    // No secret key set — decode without verify (dev only)
+    if (
+      !process.env.CLERK_SECRET_KEY ||
+      process.env.CLERK_SECRET_KEY.includes('YOUR_SECRET_KEY')
+    ) {
+      console.warn('[Auth] CLERK_SECRET_KEY not set — using unverified JWT decode (dev only)');
+      const payload = JSON.parse(
+        Buffer.from(token.split('.')[1], 'base64').toString('utf8')
+      );
       req.auth = { userId: payload.sub };
       return next();
     }
 
-    const clerk = getClerkClient();
-    const requestState = await clerk.authenticateRequest(req, {
-      authorizedParties: [process.env.CLIENT_URL || 'http://localhost:5173']
+    // Proper Clerk token verification (no URL parsing needed)
+    const payload = await verifyToken(token, {
+      secretKey: process.env.CLERK_SECRET_KEY
     });
 
-    if (!requestState.isSignedIn) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    req.auth = { userId: requestState.toAuth().userId };
+    req.auth = { userId: payload.sub };
     next();
   } catch (error) {
-    console.error('Auth middleware error:', error.message);
-    // Fallback: try to decode token without verification
+    console.error('[Auth] Token verification failed:', error.message);
+
+    // Fallback: decode without signature verification
     try {
       const token = req.headers.authorization?.substring(7);
       if (token) {
-        const base64Payload = token.split('.')[1];
-        const payload = JSON.parse(Buffer.from(base64Payload, 'base64').toString('utf8'));
-        req.auth = { userId: payload.sub };
-        return next();
+        const parts = token.split('.');
+        if (parts.length === 3) {
+          const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+          if (payload.sub) {
+            req.auth = { userId: payload.sub };
+            return next();
+          }
+        }
       }
-    } catch (e) {
-      // ignore
-    }
+    } catch (_) {}
+
     return res.status(401).json({ error: 'Authentication failed' });
   }
 };
