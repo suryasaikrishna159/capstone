@@ -1,63 +1,55 @@
 import React, { useEffect, useRef, useState } from 'react';
 import '../styles/components.css';
 
-function VideoTile({ stream, userName, isMuted, isCameraOff, isScreenSharing, isLocal, isHost }) {
+function VideoTile({ stream, userName, isMuted, isCameraOff, isScreenSharing, isLocal, isHost, iceState }) {
   const videoRef = useRef(null);
   const audioRef = useRef(null);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
 
-  // Attach stream to video element and explicitly trigger play()
+  // Attach stream to video element
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !stream) return;
 
     video.srcObject = stream;
 
-    // Explicitly call play() — required in many browsers even with autoPlay attribute
     const tryPlay = async () => {
       try {
         await video.play();
         setAutoplayBlocked(false);
       } catch (err) {
         if (err.name === 'NotAllowedError' || err.name === 'AbortError') {
-          console.warn('[VideoTile] Autoplay blocked for', userName, '— waiting for click');
+          console.warn(`[VideoTile] Autoplay blocked for ${userName} — waiting for click`);
           setAutoplayBlocked(true);
         }
       }
     };
 
-    // Small delay to ensure the stream is stable before playing
-    const timer = setTimeout(tryPlay, 100);
-    return () => clearTimeout(timer);
+    const t = setTimeout(tryPlay, 100);
+    return () => clearTimeout(t);
   }, [stream]);
 
-  // Separate audio element for remote participants
-  // This bypasses autoplay restrictions on video elements in some browsers
+  // Separate audio element for remote (bypasses autoplay on some browsers)
   useEffect(() => {
     if (isLocal || !stream || !audioRef.current) return;
-
     const audioTracks = stream.getAudioTracks();
     if (audioTracks.length === 0) return;
-
     const audioStream = new MediaStream(audioTracks);
     audioRef.current.srcObject = audioStream;
     audioRef.current.play().catch(() => {});
   }, [stream, isLocal]);
 
   const handleTileClick = () => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.play()
-      .then(() => setAutoplayBlocked(false))
-      .catch(() => {});
-
-    if (audioRef.current) {
-      audioRef.current.play().catch(() => {});
-    }
+    videoRef.current?.play().then(() => setAutoplayBlocked(false)).catch(() => {});
+    if (audioRef.current) audioRef.current.play().catch(() => {});
   };
 
   const hasVideo = stream && stream.getVideoTracks().length > 0;
   const showPlaceholder = isCameraOff || !stream || !hasVideo;
+
+  // ICE state helpers
+  const isConnecting = !isLocal && iceState && iceState !== 'connected' && iceState !== 'completed';
+  const isFailed     = !isLocal && (iceState === 'failed');
 
   return (
     <div
@@ -65,7 +57,7 @@ function VideoTile({ stream, userName, isMuted, isCameraOff, isScreenSharing, is
       onClick={autoplayBlocked ? handleTileClick : undefined}
       style={{ cursor: autoplayBlocked ? 'pointer' : 'default' }}
     >
-      {/* Video element — always rendered, hidden when camera off */}
+      {/* Main video element */}
       <video
         ref={videoRef}
         autoPlay
@@ -74,10 +66,10 @@ function VideoTile({ stream, userName, isMuted, isCameraOff, isScreenSharing, is
         className={`video-element ${showPlaceholder ? 'hidden' : ''}`}
       />
 
-      {/* Separate audio element for remote participants (not shown, just plays audio) */}
+      {/* Separate audio for remote participants */}
       {!isLocal && <audio ref={audioRef} autoPlay playsInline style={{ display: 'none' }} />}
 
-      {/* Avatar placeholder when camera is off or no stream */}
+      {/* Avatar when camera is off or no stream */}
       {showPlaceholder && (
         <div className="video-placeholder">
           <div className="placeholder-avatar">
@@ -87,7 +79,24 @@ function VideoTile({ stream, userName, isMuted, isCameraOff, isScreenSharing, is
         </div>
       )}
 
-      {/* Autoplay blocked overlay — user must click to start audio/video */}
+      {/* ICE connecting indicator */}
+      {isConnecting && !isFailed && !autoplayBlocked && (
+        <div className="ice-overlay ice-connecting">
+          <div className="ice-spinner" />
+          <span>Connecting...</span>
+        </div>
+      )}
+
+      {/* ICE failed indicator — ICE auto-restart is running in background */}
+      {isFailed && (
+        <div className="ice-overlay ice-failed">
+          <span className="ice-failed-icon">⚠️</span>
+          <span>Reconnecting...</span>
+          <small>Trying TURN relay</small>
+        </div>
+      )}
+
+      {/* Autoplay blocked overlay */}
       {autoplayBlocked && !isLocal && (
         <div className="autoplay-overlay">
           <div className="autoplay-btn">
@@ -106,13 +115,13 @@ function VideoTile({ stream, userName, isMuted, isCameraOff, isScreenSharing, is
             {isHost && <span className="host-badge"> ⭐ Host</span>}
           </span>
           <div className="tile-status">
-            <span className={`status-icon ${isMuted ? 'muted' : 'active'}`} title={isMuted ? 'Muted' : 'Unmuted'}>
+            <span className={`status-icon ${isMuted ? 'muted' : 'active'}`}>
               {isMuted ? '🔇' : '🎙️'}
             </span>
-            <span className={`status-icon ${isCameraOff ? 'off' : 'active'}`} title={isCameraOff ? 'Camera off' : 'Camera on'}>
+            <span className={`status-icon ${isCameraOff ? 'off' : 'active'}`}>
               {isCameraOff ? '📵' : '📹'}
             </span>
-            {isScreenSharing && <span className="status-icon active" title="Sharing screen">🖥️</span>}
+            {isScreenSharing && <span className="status-icon active">🖥️</span>}
           </div>
         </div>
       </div>

@@ -24,6 +24,7 @@ function VideoGrid({ localStream, remoteStreams, localUser, hostId, isMuted, isC
         isScreenSharing={isScreenSharing}
         isLocal={true}
         isHost={localUser?.userId === hostId}
+        iceState="connected"
       />
       {remoteEntries.map(([socketId, info]) => (
         <VideoTile
@@ -35,6 +36,7 @@ function VideoGrid({ localStream, remoteStreams, localUser, hostId, isMuted, isC
           isScreenSharing={info.isScreenSharing}
           isLocal={false}
           isHost={info.userId === hostId}
+          iceState={info.iceState || 'checking'}
         />
       ))}
     </div>

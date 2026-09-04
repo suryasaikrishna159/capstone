@@ -83,3 +83,12 @@
   .navbar-links { display: none; }
   .user-name { display: none; }
 }
+
+/* --- ICE Connection Overlays ------------------------------- */
+.ice-overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border-radius: 10px; z-index: 4; font-size: 12px; font-weight: 600; }
+.ice-connecting { background: rgba(0,0,0,0.55); color: #9ca3af; }
+.ice-failed     { background: rgba(0,0,0,0.65); color: #fbbf24; }
+.ice-failed-icon { font-size: 24px; }
+.ice-failed small { font-weight: 400; color: #9ca3af; font-size: 10px; }
+.ice-spinner { width: 20px; height: 20px; border: 2px solid rgba(255,255,255,0.2); border-top-color: #9ca3af; border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }

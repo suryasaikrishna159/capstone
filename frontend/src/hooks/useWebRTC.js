@@ -1,45 +1,55 @@
 /**
- * useWebRTC.js
- * Manages all WebRTC peer connections (full-mesh architecture).
+ * useWebRTC.js — Full-mesh WebRTC hook with TURN fallbacks and ICE auto-restart
  *
- * TURN servers are REQUIRED for reliable production use when participants
- * are on different networks/ISPs (especially behind carrier-grade NAT).
+ * TURN servers tried in this order (browser picks the fastest working one):
+ *   1. VITE_TURN_* env vars (Netlify → your Metered.ca account, most reliable)
+ *   2. Open Relay by Metered.ca  (free, shared, openrelayproject/openrelayproject)
+ *   3. FreeSun TURN             (free, shared, free/free)
  *
- * Set these in Netlify environment variables:
- *   VITE_TURN_URL      = turn:YOUR_TURN_SERVER:3478
- *   VITE_TURN_USERNAME = your_username
- *   VITE_TURN_CREDENTIAL = your_credential
+ * ICE restart: if ICE fails, the offerer automatically retries up to 3 times.
  */
 import { useRef, useState, useCallback } from 'react';
 
-// ─── ICE Server Config ───────────────────────────────────────────────────────
+// ─── ICE Server Config ────────────────────────────────────────────────────────
 const buildIceServers = () => {
-  const servers = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
-  ];
-
-  // Custom TURN server from environment (set in Netlify env vars)
-  const turnUrl = import.meta.env.VITE_TURN_URL;
+  const turnUrl  = import.meta.env.VITE_TURN_URL;
   const turnUser = import.meta.env.VITE_TURN_USERNAME;
   const turnCred = import.meta.env.VITE_TURN_CREDENTIAL;
 
+  const servers = [];
+
+  // ① User-configured TURN (add to Netlify env vars for best reliability)
   if (turnUrl && turnUser && turnCred) {
-    console.log('[WebRTC] Using configured TURN server:', turnUrl);
-    servers.push({ urls: turnUrl, username: turnUser, credential: turnCred });
-  } else {
-    // Free Open Relay TURN server — works globally, no sign-up needed.
-    // Limits: ~500MB/month free bandwidth. Replace with your own for production.
-    console.log('[WebRTC] Using Open Relay TURN server (free tier)');
+    console.log('[WebRTC] Using custom TURN server:', turnUrl);
     servers.push(
-      { urls: 'turn:openrelay.metered.live:80',  username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.live:443', username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turns:openrelay.metered.live:443', username: 'openrelayproject', credential: 'openrelayproject' }
+      { urls: turnUrl,                             username: turnUser, credential: turnCred },
+      { urls: `${turnUrl}?transport=tcp`,          username: turnUser, credential: turnCred }
     );
   }
+
+  // ② STUN servers
+  servers.push(
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:freestun.net:3479' }
+  );
+
+  // ③ Open Relay TURN (Metered.ca free shared server)
+  servers.push(
+    { urls: 'turn:openrelay.metered.live:80',                username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.live:80?transport=tcp',  username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.live:443',               username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.live:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turns:openrelay.metered.live:443',              username: 'openrelayproject', credential: 'openrelayproject' }
+  );
+
+  // ④ FreeSun TURN (backup free TURN server)
+  servers.push(
+    { urls: 'turn:freestun.net:3479',  username: 'free', credential: 'free' },
+    { urls: 'turn:freestun.net:3478',  username: 'free', credential: 'free' },
+    { urls: 'turns:freestun.net:5350', username: 'free', credential: 'free' }
+  );
 
   return servers;
 };
@@ -47,25 +57,28 @@ const buildIceServers = () => {
 const ICE_CONFIG = {
   iceServers: buildIceServers(),
   iceCandidatePoolSize: 10,
-  iceTransportPolicy: 'all' // Try direct first, then relay
+  iceTransportPolicy: 'all',
+  bundlePolicy: 'max-bundle',
+  rtcpMuxPolicy: 'require',
 };
 
-// ─── Hook ────────────────────────────────────────────────────────────────────
+// ─── Hook ─────────────────────────────────────────────────────────────────────
 export function useWebRTC({ socket, meetingId }) {
-  const localStreamRef = useRef(null);
-  const peerConnectionsRef = useRef({});
-  const pendingCandidatesRef = useRef({});
-  const screenStreamRef = useRef(null);
+  const localStreamRef        = useRef(null);
+  const peerConnectionsRef    = useRef({});
+  const pendingCandidatesRef  = useRef({});
+  const screenStreamRef       = useRef(null);
   const originalVideoTrackRef = useRef(null);
+  const iceRestartCountRef    = useRef({}); // { socketId: number }
 
-  const [localStream, setLocalStream] = useState(null);
-  const [remoteStreams, setRemoteStreams] = useState({});
-  const [isMuted, setIsMuted] = useState(false);
-  const [isCameraOff, setIsCameraOff] = useState(false);
-  const [isScreenSharing, setIsScreenSharing] = useState(false);
-  const [mediaError, setMediaError] = useState(null);
+  const [localStream,    setLocalStream]    = useState(null);
+  const [remoteStreams,  setRemoteStreams]   = useState({});
+  const [isMuted,        setIsMuted]        = useState(false);
+  const [isCameraOff,    setIsCameraOff]    = useState(false);
+  const [isScreenSharing,setIsScreenSharing]= useState(false);
+  const [mediaError,     setMediaError]     = useState(null);
 
-  // ── initLocalStream ───────────────────────────────────────────────────────
+  // ── initLocalStream ─────────────────────────────────────────────────────────
   const initLocalStream = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -75,35 +88,33 @@ export function useWebRTC({ socket, meetingId }) {
       localStreamRef.current = stream;
       setLocalStream(stream);
       setMediaError(null);
-      console.log('[WebRTC] Local stream ready. Tracks:', stream.getTracks().map(t => t.kind));
+      console.log('[WebRTC] Local stream ready:', stream.getTracks().map(t => t.kind));
       return stream;
     } catch (err) {
       console.error('[WebRTC] getUserMedia error:', err.name, err.message);
-      let msg = 'Failed to access camera/microphone.';
-      if (err.name === 'NotAllowedError') msg = 'Permission denied. Please allow camera/mic access.';
-      else if (err.name === 'NotFoundError') msg = 'No camera or microphone found.';
-      else if (err.name === 'NotReadableError') msg = 'Camera/mic in use by another app.';
+      let msg = 'Could not access camera/microphone.';
+      if (err.name === 'NotAllowedError')   msg = 'Permission denied. Please allow camera/mic.';
+      else if (err.name === 'NotFoundError') msg = 'No camera or microphone detected.';
+      else if (err.name === 'NotReadableError') msg = 'Camera is in use by another app.';
       setMediaError(msg);
-
-      // Fallback: audio only
       try {
-        const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        localStreamRef.current = audioStream;
-        setLocalStream(audioStream);
+        const audioOnly = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        localStreamRef.current = audioOnly;
+        setLocalStream(audioOnly);
         setIsCameraOff(true);
-        setMediaError('Camera unavailable — joining with audio only.');
-        return audioStream;
+        setMediaError('Camera unavailable — audio only.');
+        return audioOnly;
       } catch (_) {
-        const emptyStream = new MediaStream();
-        localStreamRef.current = emptyStream;
-        setLocalStream(emptyStream);
+        const empty = new MediaStream();
+        localStreamRef.current = empty;
+        setLocalStream(empty);
         setMediaError('No media devices available.');
-        return emptyStream;
+        return empty;
       }
     }
   }, []);
 
-  // ── createPeerConnection ──────────────────────────────────────────────────
+  // ── createPeerConnection ────────────────────────────────────────────────────
   const createPeerConnection = useCallback((socketId, userInfo = {}) => {
     if (peerConnectionsRef.current[socketId]) {
       return peerConnectionsRef.current[socketId];
@@ -112,32 +123,24 @@ export function useWebRTC({ socket, meetingId }) {
     console.log(`[WebRTC] Creating PC for ${socketId} (${userInfo.userName})`);
     const pc = new RTCPeerConnection(ICE_CONFIG);
     peerConnectionsRef.current[socketId] = pc;
+    iceRestartCountRef.current[socketId] = 0;
 
-    // Add local tracks to PC
+    // Add local tracks
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => {
         console.log(`[WebRTC] Adding ${track.kind} track to PC[${socketId}]`);
         pc.addTrack(track, localStreamRef.current);
       });
     } else {
-      console.warn('[WebRTC] No local stream when creating PC — tracks not added');
+      console.warn('[WebRTC] No local stream when creating PC — tracks not added yet');
     }
 
-    // Send ICE candidates to remote peer via signaling server
+    // ICE candidate → relay to peer
     pc.onicecandidate = ({ candidate }) => {
-      if (candidate) {
-        socket.emit('ice-candidate', { to: socketId, candidate });
-      }
+      if (candidate) socket.emit('ice-candidate', { to: socketId, candidate });
     };
 
-    pc.onicecandidateerror = (e) => {
-      // Only log serious errors, not routine STUN/TURN misses
-      if (e.errorCode !== 701) {
-        console.warn(`[WebRTC] ICE candidate error [${socketId}]:`, e.errorText);
-      }
-    };
-
-    // Receive remote media tracks
+    // Remote track arrived → update UI
     pc.ontrack = ({ streams }) => {
       if (streams && streams[0]) {
         console.log(`[WebRTC] Got remote track from ${socketId} (${userInfo.userName})`);
@@ -149,33 +152,65 @@ export function useWebRTC({ socket, meetingId }) {
             userName: userInfo.userName || 'Participant',
             isMuted: userInfo.isMuted || false,
             isCameraOff: userInfo.isCameraOff || false,
-            isScreenSharing: userInfo.isScreenSharing || false
+            isScreenSharing: userInfo.isScreenSharing || false,
+            iceState: 'checking'
           }
         }));
       }
     };
 
-    pc.onconnectionstatechange = () => {
-      const state = pc.connectionState;
-      console.log(`[WebRTC] PC[${socketId}] connectionState: ${state}`);
-      if (state === 'failed') {
-        console.error(`[WebRTC] Connection FAILED for ${socketId}. ICE may need TURN.`);
-        setRemoteStreams(prev => { const n = { ...prev }; delete n[socketId]; return n; });
+    // ICE state changes
+    pc.oniceconnectionstatechange = () => {
+      const state = pc.iceConnectionState;
+      console.log(`[WebRTC] PC[${socketId}] iceConnectionState: ${state}`);
+
+      // Keep UI in sync with ICE state
+      setRemoteStreams(prev => {
+        if (!prev[socketId]) return prev;
+        return { ...prev, [socketId]: { ...prev[socketId], iceState: state } };
+      });
+
+      if (state === 'connected' || state === 'completed') {
+        console.log(`[WebRTC] ✅ ICE connected for ${socketId}`);
+        iceRestartCountRef.current[socketId] = 0; // reset retry counter
+        return;
+      }
+
+      // Auto-restart ICE (only the offerer restarts — identified by localDescription.type)
+      if (state === 'failed' || state === 'disconnected') {
+        const maxRestarts = 3;
+        const count = iceRestartCountRef.current[socketId] || 0;
+
+        if (count < maxRestarts && pc.localDescription?.type === 'offer') {
+          iceRestartCountRef.current[socketId] = count + 1;
+          const delay = (count + 1) * 2000; // 2s, 4s, 6s
+          console.log(`[WebRTC] ICE ${state} for ${socketId} — restarting in ${delay}ms (attempt ${count + 1}/${maxRestarts})`);
+
+          setTimeout(async () => {
+            if (pc.connectionState === 'connected' || pc.connectionState === 'closed') return;
+            try {
+              const offer = await pc.createOffer({ iceRestart: true });
+              await pc.setLocalDescription(offer);
+              socket.emit('offer', { to: socketId, offer });
+              console.log(`[WebRTC] ICE restart offer sent to ${socketId}`);
+            } catch (err) {
+              console.error('[WebRTC] ICE restart offer failed:', err);
+            }
+          }, delay);
+        } else if (state === 'failed') {
+          console.error(`[WebRTC] ❌ Connection permanently failed for ${socketId}.`);
+        }
       }
     };
 
-    pc.oniceconnectionstatechange = () => {
-      console.log(`[WebRTC] PC[${socketId}] iceConnectionState: ${pc.iceConnectionState}`);
-    };
-
-    pc.onsignalingstatechange = () => {
-      console.log(`[WebRTC] PC[${socketId}] signalingState: ${pc.signalingState}`);
+    pc.onconnectionstatechange = () => {
+      console.log(`[WebRTC] PC[${socketId}] connectionState: ${pc.connectionState}`);
     };
 
     return pc;
   }, [socket]);
 
-  // ── createOffer ───────────────────────────────────────────────────────────
+  // ── createOffer ─────────────────────────────────────────────────────────────
   const createOffer = useCallback(async (socketId, userInfo = {}) => {
     console.log(`[WebRTC] Creating offer for ${socketId} (${userInfo.userName})`);
     const pc = createPeerConnection(socketId, userInfo);
@@ -189,15 +224,13 @@ export function useWebRTC({ socket, meetingId }) {
     }
   }, [createPeerConnection, socket]);
 
-  // ── handleOffer ───────────────────────────────────────────────────────────
+  // ── handleOffer ─────────────────────────────────────────────────────────────
   const handleOffer = useCallback(async ({ from, offer, userInfo = {} }) => {
     console.log(`[WebRTC] Handling offer from ${from} (${userInfo.userName})`);
     const pc = createPeerConnection(from, userInfo);
     try {
-      if (pc.signalingState !== 'have-remote-offer') {
-        await pc.setRemoteDescription(new RTCSessionDescription(offer));
-      }
-      // Flush any queued ICE candidates
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      // Flush queued ICE candidates
       if (pendingCandidatesRef.current[from]) {
         for (const c of pendingCandidatesRef.current[from]) {
           try { await pc.addIceCandidate(c); } catch (_) {}
@@ -213,15 +246,14 @@ export function useWebRTC({ socket, meetingId }) {
     }
   }, [createPeerConnection, socket]);
 
-  // ── handleAnswer ──────────────────────────────────────────────────────────
+  // ── handleAnswer ────────────────────────────────────────────────────────────
   const handleAnswer = useCallback(async ({ from, answer }) => {
     console.log(`[WebRTC] Handling answer from ${from}`);
     const pc = peerConnectionsRef.current[from];
-    if (!pc) { console.warn('[WebRTC] No PC found for answer from', from); return; }
+    if (!pc) return;
     try {
       if (pc.signalingState === 'have-local-offer') {
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
-        // Flush queued ICE candidates
         if (pendingCandidatesRef.current[from]) {
           for (const c of pendingCandidatesRef.current[from]) {
             try { await pc.addIceCandidate(c); } catch (_) {}
@@ -234,30 +266,29 @@ export function useWebRTC({ socket, meetingId }) {
     }
   }, []);
 
-  // ── handleIceCandidate ────────────────────────────────────────────────────
+  // ── handleIceCandidate ──────────────────────────────────────────────────────
   const handleIceCandidate = useCallback(async ({ from, candidate }) => {
     if (!candidate) return;
     const pc = peerConnectionsRef.current[from];
     const iceCandidate = new RTCIceCandidate(candidate);
-    if (pc && pc.remoteDescription && pc.remoteDescription.type) {
+    if (pc && pc.remoteDescription?.type) {
       try { await pc.addIceCandidate(iceCandidate); } catch (_) {}
     } else {
-      // Queue candidates that arrive before remote description is set
       if (!pendingCandidatesRef.current[from]) pendingCandidatesRef.current[from] = [];
       pendingCandidatesRef.current[from].push(iceCandidate);
     }
   }, []);
 
-  // ── handleUserLeft ────────────────────────────────────────────────────────
+  // ── handleUserLeft ──────────────────────────────────────────────────────────
   const handleUserLeft = useCallback((socketId) => {
-    console.log('[WebRTC] User left, closing PC:', socketId);
     const pc = peerConnectionsRef.current[socketId];
     if (pc) { pc.close(); delete peerConnectionsRef.current[socketId]; }
     delete pendingCandidatesRef.current[socketId];
+    delete iceRestartCountRef.current[socketId];
     setRemoteStreams(prev => { const n = { ...prev }; delete n[socketId]; return n; });
   }, []);
 
-  // ── updateRemoteUser ──────────────────────────────────────────────────────
+  // ── updateRemoteUser ────────────────────────────────────────────────────────
   const updateRemoteUser = useCallback((socketId, updates) => {
     setRemoteStreams(prev => {
       if (!prev[socketId]) return prev;
@@ -265,7 +296,7 @@ export function useWebRTC({ socket, meetingId }) {
     });
   }, []);
 
-  // ── toggleMute ────────────────────────────────────────────────────────────
+  // ── toggleMute ──────────────────────────────────────────────────────────────
   const toggleMute = useCallback(() => {
     if (!localStreamRef.current) return;
     const newMuted = !isMuted;
@@ -274,7 +305,7 @@ export function useWebRTC({ socket, meetingId }) {
     socket.emit('mute-status', { meetingId, isMuted: newMuted });
   }, [isMuted, socket, meetingId]);
 
-  // ── toggleCamera ──────────────────────────────────────────────────────────
+  // ── toggleCamera ────────────────────────────────────────────────────────────
   const toggleCamera = useCallback(() => {
     if (!localStreamRef.current) return;
     const newOff = !isCameraOff;
@@ -283,10 +314,9 @@ export function useWebRTC({ socket, meetingId }) {
     socket.emit('camera-status', { meetingId, isCameraOff: newOff });
   }, [isCameraOff, socket, meetingId]);
 
-  // ── stopScreenShare ref (prevents stale closure) ──────────────────────────
+  // ── screen share ────────────────────────────────────────────────────────────
   const stopScreenShareRef = useRef(null);
 
-  // ── startScreenShare ──────────────────────────────────────────────────────
   const startScreenShare = useCallback(async () => {
     try {
       const screenStream = await navigator.mediaDevices.getDisplayMedia({
@@ -309,7 +339,6 @@ export function useWebRTC({ socket, meetingId }) {
     }
   }, [socket, meetingId]);
 
-  // ── stopScreenShare ───────────────────────────────────────────────────────
   const stopScreenShare = useCallback(async () => {
     if (!screenStreamRef.current) return;
     screenStreamRef.current.getTracks().forEach(t => t.stop());
@@ -328,7 +357,7 @@ export function useWebRTC({ socket, meetingId }) {
 
   stopScreenShareRef.current = stopScreenShare;
 
-  // ── cleanup ───────────────────────────────────────────────────────────────
+  // ── cleanup ─────────────────────────────────────────────────────────────────
   const cleanup = useCallback(() => {
     localStreamRef.current?.getTracks().forEach(t => t.stop());
     localStreamRef.current = null;
@@ -337,6 +366,7 @@ export function useWebRTC({ socket, meetingId }) {
     Object.values(peerConnectionsRef.current).forEach(pc => pc.close());
     peerConnectionsRef.current = {};
     pendingCandidatesRef.current = {};
+    iceRestartCountRef.current = {};
     setLocalStream(null);
     setRemoteStreams({});
     setIsScreenSharing(false);
