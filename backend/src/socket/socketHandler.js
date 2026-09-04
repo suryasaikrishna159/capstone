@@ -36,7 +36,7 @@ const initSocket = (io) => {
 
       const room = roomUsers.get(meetingId);
 
-      // Send list of existing users to the new joiner
+      // Send list of existing users to the new joiner BEFORE adding self
       const existingUsers = Array.from(room.entries()).map(([sid, info]) => ({
         socketId: sid,
         ...info
@@ -66,12 +66,18 @@ const initSocket = (io) => {
     });
 
     // ─── WebRTC Signaling ─────────────────────────────────────────────────────
+    // IMPORTANT: Use socket.to(targetSocketId) NOT io.to(targetSocketId)
+    // io.to() treats the ID as a room name; socket.to() targets a specific socket
+
     socket.on('offer', ({ to, offer }) => {
       const meetingId = socketToRoom.get(socket.id);
       const room = meetingId ? roomUsers.get(meetingId) : null;
       const senderInfo = room ? room.get(socket.id) : {};
 
-      io.to(to).emit('offer', {
+      console.log(`[Signaling] Offer: ${socket.id} → ${to}`);
+
+      // socket.to(to) correctly targets the specific socket by ID
+      socket.to(to).emit('offer', {
         from: socket.id,
         offer,
         userInfo: senderInfo || {}
@@ -79,14 +85,15 @@ const initSocket = (io) => {
     });
 
     socket.on('answer', ({ to, answer }) => {
-      io.to(to).emit('answer', {
+      console.log(`[Signaling] Answer: ${socket.id} → ${to}`);
+      socket.to(to).emit('answer', {
         from: socket.id,
         answer
       });
     });
 
     socket.on('ice-candidate', ({ to, candidate }) => {
-      io.to(to).emit('ice-candidate', {
+      socket.to(to).emit('ice-candidate', {
         from: socket.id,
         candidate
       });
@@ -148,7 +155,6 @@ const initSocket = (io) => {
       const room = roomUsers.get(meetingId);
       if (!room) return;
 
-      // Verify the requester is actually the host (validate by userId in room)
       const requesterInfo = room.get(socket.id);
       if (!requesterInfo || requesterInfo.userId !== hostUserId) {
         socket.emit('error', { message: 'Only the host can remove participants' });
@@ -174,12 +180,10 @@ const initSocket = (io) => {
         return;
       }
 
-      // Notify all participants
       io.to(meetingId).emit('meeting-ended', {
         message: 'The host has ended the meeting.'
       });
 
-      // Clear room
       roomUsers.delete(meetingId);
     });
 
@@ -215,7 +219,6 @@ function handleUserLeave(io, socket, meetingId) {
     roomUsers.delete(meetingId);
   }
 
-  // Notify remaining users
   socket.to(meetingId).emit('user-left', {
     socketId: socket.id,
     ...userInfo
@@ -224,7 +227,6 @@ function handleUserLeave(io, socket, meetingId) {
   socket.leave(meetingId);
   socketToRoom.delete(socket.id);
 
-  // Update participant list
   if (room.size > 0) {
     broadcastParticipants(io, meetingId);
   }
