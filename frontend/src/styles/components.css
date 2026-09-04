@@ -74,6 +74,11 @@
 .btn-remove { background: none; border: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 4px 8px; border-radius: 4px; transition: all 0.2s; flex-shrink: 0; }
 .btn-remove:hover { color: var(--danger); background: rgba(239,68,68,0.1); }
 
+/* ─── Autoplay Overlay ────────────────────────────────── */
+.autoplay-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.5); border-radius: 10px; z-index: 5; }
+.autoplay-btn { display: flex; flex-direction: column; align-items: center; gap: 6px; background: rgba(79,70,229,0.85); color: #fff; border-radius: var(--radius-sm); padding: 12px 20px; font-size: 13px; font-weight: 600; pointer-events: none; }
+.autoplay-btn span:first-child { font-size: 24px; }
+
 @media (max-width: 768px) {
   .navbar-links { display: none; }
   .user-name { display: none; }
