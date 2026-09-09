@@ -50,64 +50,74 @@ function initTranslationHandlers(io, socket, roomUsers) {
   socket.on('transcript-final', async ({ meetingId, utteranceId, speakerId, speakerName, sourceText, sourceLang, timestamp } = {}) => {
     if (!meetingId || !sourceText || !sourceText.trim()) return;
 
-    // Rate limiting
+    // Rate limiting: relax to 150ms so natural pauses aren't discarded
     const now = Date.now();
-    if (now - (lastFinalTime.get(socket.id) || 0) < FINAL_MIN_INTERVAL_MS) return;
+    if (now - (lastFinalTime.get(socket.id) || 0) < 150) return;
     lastFinalTime.set(socket.id, now);
 
     const ts = timestamp || now;
+    const cleanText = sourceText.trim();
+    const cleanLang = sourceLang || 'en';
 
-    // Broadcast final transcript to everyone in room for display
+    console.log(`[Transcript Final] from ${speakerName || 'User'}(${socket.id}) in ${meetingId}: "${cleanText}" [${cleanLang}]`);
+
+    // Broadcast final transcript to everyone in room for real-time display
     io.to(meetingId).emit('transcript-final', {
-      utteranceId, speakerId, speakerName, sourceText, sourceLang, timestamp: ts
+      utteranceId, speakerId, speakerName, sourceText: cleanText, sourceLang: cleanLang, timestamp: ts
     });
 
-    // Find all listeners who need a different language
+    // Find all target languages needed in this room
     const room = roomUsers.get(meetingId);
-    if (!room) return;
+    const targetLangs = new Set();
 
-    // Build targetLang → [socketId] map (skip speaker, skip same-language listeners)
-    const targetGroups = new Map(); // targetLang → [socketId]
-    for (const [sid] of room.entries()) {
-      if (sid === socket.id) continue; // don't send translation back to speaker
-      const pref = userLanguages.get(sid);
-      if (!pref?.listeningLang) continue;
-      if (pref.listeningLang === sourceLang) continue; // same language — no translation needed
-      const tl = pref.listeningLang;
-      if (!targetGroups.has(tl)) targetGroups.set(tl, []);
-      targetGroups.get(tl).push(sid);
+    if (room) {
+      for (const [sid] of room.entries()) {
+        const pref = userLanguages.get(sid);
+        if (pref?.listeningLang && pref.listeningLang !== cleanLang) {
+          targetLangs.add(pref.listeningLang);
+        }
+      }
     }
 
-    if (targetGroups.size === 0) return; // nothing to translate
+    // Also check the speaker's own preference
+    const speakerPref = userLanguages.get(socket.id);
+    if (speakerPref?.listeningLang && speakerPref.listeningLang !== cleanLang) {
+      targetLangs.add(speakerPref.listeningLang);
+    }
+
+    // Default target language if none configured yet
+    if (targetLangs.size === 0) {
+      if (cleanLang === 'en') targetLangs.add('te');
+      else targetLangs.add('en');
+    }
 
     // Translate in parallel for each unique target language
     const translationResults = [];
     await Promise.all(
-      [...targetGroups.entries()].map(async ([targetLang, socketIds]) => {
-        console.log(`[Translation] ${sourceLang}→${targetLang} for ${socketIds.length} listener(s)`);
-        const result = await translateText(sourceText.trim(), sourceLang, targetLang);
-        translationResults.push({ targetLang, socketIds, ...result });
+      [...targetLangs].map(async (targetLang) => {
+        console.log(`[Translation] Translating "${cleanText}" ${cleanLang} → ${targetLang}`);
+        const result = await translateText(cleanText, cleanLang, targetLang);
+        console.log(`[Translation] Done (${cleanLang}→${targetLang}): "${result.translatedText}" in ${result.latency}ms`);
+        translationResults.push({ targetLang, ...result });
 
-        // Deliver to each listener
-        for (const sid of socketIds) {
-          io.to(sid).emit('translation-complete', {
-            utteranceId, speakerId, speakerName,
-            sourceText, sourceLang,
-            translatedText: result.translatedText,
-            targetLang,
-            latency: result.latency || 0,
-            fromCache: result.fromCache || false,
-            error: result.error || null,
-            timestamp: ts
-          });
-        }
+        // Broadcast translated text to entire room so everyone sees it in the transcript panel
+        io.to(meetingId).emit('translation-complete', {
+          utteranceId, speakerId, speakerName,
+          sourceText: cleanText, sourceLang: cleanLang,
+          translatedText: result.translatedText,
+          targetLang,
+          latency: result.latency || 0,
+          fromCache: result.fromCache || false,
+          error: result.error || null,
+          timestamp: ts
+        });
       })
     );
 
     // Persist final transcript to MongoDB (best-effort, non-blocking)
     Transcript.create({
       meetingId, utteranceId, speakerId, speakerName,
-      sourceLanguage: sourceLang, sourceText: sourceText.trim(),
+      sourceLanguage: cleanLang, sourceText: cleanText,
       translations: translationResults
         .filter(r => r.translatedText && !r.error)
         .map(r => ({ targetLanguage: r.targetLang, translatedText: r.translatedText, latency: r.latency })),

@@ -27,6 +27,8 @@ export function useTranslatedAudio({ enabled }) {
     }
   }, [enabled]);
 
+  const activeUtteranceRef = useRef(null);
+
   const playNext = useCallback(() => {
     if (isPlayingRef.current) return;
     if (!enabledRef.current) { queueRef.current = []; return; }
@@ -34,6 +36,8 @@ export function useTranslatedAudio({ enabled }) {
 
     const { text, lang } = queueRef.current.shift();
     if (!text || !text.trim()) { playNext(); return; }
+
+    if (!window.speechSynthesis) return;
 
     // Some browsers need synth to be unpaused first
     if (window.speechSynthesis.paused) window.speechSynthesis.resume();
@@ -43,19 +47,42 @@ export function useTranslatedAudio({ enabled }) {
     utterance.rate   = 1.0;
     utterance.volume = 1.0;
 
+    // Pick best matching voice if available
+    try {
+      const voices = window.speechSynthesis.getVoices();
+      if (voices && voices.length > 0) {
+        const prefix = (lang || '').split('-')[0].toLowerCase();
+        const matched = voices.find(v => v.lang === lang) ||
+                        voices.find(v => v.lang.toLowerCase().startsWith(prefix));
+        if (matched) utterance.voice = matched;
+      }
+    } catch (_) {}
+
+    // Store reference to prevent Chrome GC bug during playback
+    activeUtteranceRef.current = utterance;
+
     utterance.onstart = () => {
       isPlayingRef.current = true;
       setIsSpeaking(true);
     };
     const done = () => {
+      activeUtteranceRef.current = null;
       isPlayingRef.current = false;
       setIsSpeaking(false);
-      setTimeout(playNext, 100); // small gap between utterances
+      setTimeout(playNext, 120);
     };
     utterance.onend   = done;
-    utterance.onerror = done;
+    utterance.onerror = (e) => {
+      console.warn('[TTS] Error:', e.error);
+      done();
+    };
 
-    window.speechSynthesis.speak(utterance);
+    try {
+      window.speechSynthesis.speak(utterance);
+    } catch (err) {
+      console.error('[TTS] speak failed:', err);
+      done();
+    }
   }, []);
 
   const enqueue = useCallback((text, lang) => {

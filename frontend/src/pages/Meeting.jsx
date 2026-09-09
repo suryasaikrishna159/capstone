@@ -81,13 +81,20 @@ function Meeting() {
     toggleMute, toggleCamera, startScreenShare, stopScreenShare, cleanup
   } = useWebRTC({ socket: socketProxy.current, meetingId });
 
-  // Stable refs for socket callbacks
+  // ── Stable refs for socket callbacks & V3 state ──────────────────────────
   const createOfferRef        = useRef(createOffer);
   const handleOfferRef        = useRef(handleOffer);
   const handleAnswerRef       = useRef(handleAnswer);
   const handleIceCandidateRef = useRef(handleIceCandidate);
   const handleUserLeftRef     = useRef(handleUserLeft);
   const updateRemoteUserRef   = useRef(updateRemoteUser);
+
+  const translationEnabledRef = useRef(translationEnabled);
+  const ttsEnabledRef         = useRef(ttsEnabled);
+  const spokenLangRef         = useRef(spokenLang);
+  const listeningLangRef       = useRef(listeningLang);
+  const userIdRef              = useRef(userId);
+  const userNameRef            = useRef(userName);
 
   useEffect(() => { createOfferRef.current        = createOffer;        }, [createOffer]);
   useEffect(() => { handleOfferRef.current         = handleOffer;         }, [handleOffer]);
@@ -96,14 +103,23 @@ function Meeting() {
   useEffect(() => { handleUserLeftRef.current      = handleUserLeft;      }, [handleUserLeft]);
   useEffect(() => { updateRemoteUserRef.current    = updateRemoteUser;    }, [updateRemoteUser]);
 
+  useEffect(() => { translationEnabledRef.current = translationEnabled; }, [translationEnabled]);
+  useEffect(() => { ttsEnabledRef.current         = ttsEnabled;         }, [ttsEnabled]);
+  useEffect(() => { spokenLangRef.current         = spokenLang;         }, [spokenLang]);
+  useEffect(() => { listeningLangRef.current       = listeningLang;       }, [listeningLang]);
+  useEffect(() => { userIdRef.current              = userId;              }, [userId]);
+  useEffect(() => { userNameRef.current            = userName;            }, [userName]);
+
   // ── V3: TTS audio queue ────────────────────────────────────────────────────
   const { enqueue: ttsEnqueue, clear: ttsClear, isSpeaking: ttsSpeaking } =
     useTranslatedAudio({ enabled: ttsEnabled && translationEnabled });
 
+  const ttsEnqueueRef = useRef(ttsEnqueue);
+  useEffect(() => { ttsEnqueueRef.current = ttsEnqueue; }, [ttsEnqueue]);
+
   // ── V3: Speech recognition (STT) ──────────────────────────────────────────
   const onSTTPartial = useCallback((text) => {
     if (!text.trim()) return;
-    // Show locally and broadcast for remote transcript panel
     setPartialTranscripts(prev => ({
       ...prev,
       [userId]: { speakerName: userName, sourceText: text }
@@ -111,31 +127,34 @@ function Meeting() {
     socketRef.current?.emit('transcript-partial', {
       meetingId, utteranceId: `${userId}-partial`,
       speakerId: userId, speakerName: userName,
-      sourceText: text, sourceLang: spokenLang, timestamp: Date.now()
+      sourceText: text, sourceLang: spokenLangRef.current, timestamp: Date.now()
     });
-  }, [meetingId, userId, userName, spokenLang]);
+  }, [meetingId, userId, userName]);
 
   const onSTTFinal = useCallback((text) => {
     if (!text.trim()) return;
-    const utteranceId = `${userId}-${++utteranceSeqRef.current}`;
+    const utteranceId = `${userId}-${++utteranceSeqRef.current}-${Date.now()}`;
     const timestamp   = Date.now();
+    const curSpoken   = spokenLangRef.current;
+
+    console.log('[Meeting] Final speech detected:', text, `[${curSpoken}]`);
 
     // Clear our own partial
     setPartialTranscripts(prev => { const n = { ...prev }; delete n[userId]; return n; });
 
-    // Add to local transcript immediately (before server echoes back)
+    // Add to local transcript immediately
     setTranscripts(prev => [...prev, {
       utteranceId, speakerId: userId, speakerName: userName,
-      sourceText: text, sourceLang: spokenLang, status: 'final', timestamp
+      sourceText: text, sourceLang: curSpoken, status: 'final', timestamp
     }]);
 
-    // Send to server for translation
+    // Send to server for translation and room broadcast
     socketRef.current?.emit('transcript-final', {
       meetingId, utteranceId,
       speakerId: userId, speakerName: userName,
-      sourceText: text, sourceLang: spokenLang, timestamp
+      sourceText: text, sourceLang: curSpoken, timestamp
     });
-  }, [meetingId, userId, userName, spokenLang]);
+  }, [meetingId, userId, userName]);
 
   const { isListening, isSupported: sttSupported, error: sttError } = useSpeechRecognition({
     enabled: translationEnabled && !isMuted,
@@ -158,11 +177,11 @@ function Meeting() {
     socketRef.current?.emit('speaker-speaking', { meetingId, isSpeaking: localSpeaking });
   }, [localSpeaking, translationEnabled, meetingId]);
 
-  // Emit language preference when changed or when translation enabled
+  // Emit language preference whenever spokenLang or listeningLang changes
   useEffect(() => {
-    if (!translationEnabled || !socketRef.current?.connected) return;
+    if (!socketRef.current?.connected) return;
     socketRef.current.emit('language-updated', { meetingId, spokenLang, listeningLang });
-  }, [spokenLang, listeningLang, translationEnabled, meetingId]);
+  }, [spokenLang, listeningLang, meetingId]);
 
   // ── Main initialization ────────────────────────────────────────────────────
   useEffect(() => {
@@ -211,6 +230,7 @@ function Meeting() {
 
         console.log('[Meeting] Emitting join-room for', meetingId);
         s.emit('join-room', { meetingId, userId, userName });
+        s.emit('language-updated', { meetingId, spokenLang: spokenLangRef.current, listeningLang: listeningLangRef.current });
         joinedRef.current = true;
 
         setLoading(false);
@@ -254,10 +274,12 @@ function Meeting() {
 
     s.on('user-joined', (info) => {
       toast.info(`${info.userName} joined`, { autoClose: 2000 });
-      // If translation is active, re-emit language preference so new joiner's server state knows ours
-      if (translationEnabled) {
-        s.emit('language-updated', { meetingId, spokenLang, listeningLang });
-      }
+      // Always broadcast language preferences so the new user's server state has ours
+      s.emit('language-updated', {
+        meetingId,
+        spokenLang: spokenLangRef.current,
+        listeningLang: listeningLangRef.current
+      });
     });
 
     s.on('offer',          (data) => handleOfferRef.current(data));
@@ -267,7 +289,6 @@ function Meeting() {
     s.on('user-left', (data) => {
       handleUserLeftRef.current(data.socketId);
       toast.info(`${data.userName || 'Participant'} left`, { autoClose: 2000 });
-      // Clean up V3 state
       setSpeakingUsers(prev => { const n = { ...prev }; delete n[data.socketId]; return n; });
       setPartialTranscripts(prev => { const n = { ...prev }; delete n[data.userId]; return n; });
     });
@@ -287,44 +308,74 @@ function Meeting() {
     s.on('disconnect', (reason) => { console.warn('[Meeting] Disconnected:', reason); setConnStatus('disconnected'); });
     s.on('reconnect', () => {
       setConnStatus('connected');
-      s.emit('join-room', { meetingId, userId, userName });
-      if (translationEnabled) s.emit('language-updated', { meetingId, spokenLang, listeningLang });
+      s.emit('join-room', { meetingId, userId: userIdRef.current, userName: userNameRef.current });
+      s.emit('language-updated', { meetingId, spokenLang: spokenLangRef.current, listeningLang: listeningLangRef.current });
     });
 
     // ── V3 events ──────────────────────────────────────────────────────────
-    // Remote participant's partial transcript (for live display only)
+    // Remote participant's partial transcript
     s.on('transcript-partial', (data) => {
-      if (data.speakerId === userId) return; // ignore our own (we handle locally)
+      if (data.speakerId === userIdRef.current) return;
       setPartialTranscripts(prev => ({
         ...prev,
         [data.speakerId]: { speakerName: data.speakerName, sourceText: data.sourceText }
       }));
     });
 
-    // Remote participant's final transcript
+    // Final transcript from anyone in the room
     s.on('transcript-final', (data) => {
-      if (data.speakerId === userId) return; // we already added ours locally
+      console.log('[Meeting] Received transcript-final from server:', data);
       setPartialTranscripts(prev => { const n = { ...prev }; delete n[data.speakerId]; return n; });
       setTranscripts(prev => {
-        // Avoid duplicates
         if (prev.some(t => t.utteranceId === data.utteranceId)) return prev;
         return [...prev, { ...data, status: 'final' }];
       });
     });
 
-    // Translated text + TTS for this client
+    // Translated text broadcast from server
     s.on('translation-complete', (data) => {
-      // Update existing transcript entry with translation
-      setTranscripts(prev => prev.map(t =>
-        t.utteranceId === data.utteranceId
-          ? { ...t, translatedText: data.translatedText, targetLang: data.targetLang, latency: data.latency, status: 'translated' }
-          : t
-      ));
+      console.log('[Meeting] Received translation-complete:', data);
 
-      // Play TTS if enabled
-      if (ttsEnabled && translationEnabled && data.translatedText && !data.error) {
-        const lang = getSpeechCode(data.targetLang);
-        ttsEnqueue(data.translatedText, lang);
+      // Update or add transcript entry with translatedText
+      setTranscripts(prev => {
+        const idx = prev.findIndex(t => t.utteranceId === data.utteranceId);
+        if (idx >= 0) {
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            translatedText: data.translatedText,
+            targetLang: data.targetLang,
+            latency: data.latency,
+            status: 'translated'
+          };
+          return updated;
+        } else {
+          return [...prev, {
+            utteranceId: data.utteranceId,
+            speakerId: data.speakerId,
+            speakerName: data.speakerName,
+            sourceText: data.sourceText,
+            sourceLang: data.sourceLang,
+            translatedText: data.translatedText,
+            targetLang: data.targetLang,
+            latency: data.latency,
+            timestamp: data.timestamp,
+            status: 'translated'
+          }];
+        }
+      });
+
+      // Play TTS audio if:
+      // - translation is enabled
+      // - TTS is enabled
+      // - targetLang matches THIS user's preferred listening language
+      // - we are not the speaker (don't hear our own words translated back to us)
+      const isMyListeningLang = data.targetLang === listeningLangRef.current;
+      const isNotMe = data.speakerId !== userIdRef.current;
+      if (translationEnabledRef.current && ttsEnabledRef.current && isMyListeningLang && isNotMe && data.translatedText && !data.error) {
+        console.log(`[Meeting] Playing TTS in ${data.targetLang}: "${data.translatedText}"`);
+        const speechCode = getSpeechCode(data.targetLang);
+        ttsEnqueueRef.current?.(data.translatedText, speechCode);
       }
     });
 
@@ -409,6 +460,7 @@ function Meeting() {
     const next = !translationEnabled;
     setTranslationEnabled(next);
     if (next) {
+      setTranscriptOpen(true);
       socketRef.current?.emit('language-updated', { meetingId, spokenLang, listeningLang });
     } else {
       ttsClear();

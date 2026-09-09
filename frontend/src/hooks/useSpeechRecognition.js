@@ -30,10 +30,27 @@ export function useSpeechRecognition({
   const onPartialRef   = useRef(onPartial);
   const onFinalRef     = useRef(onFinal);
   const restartRef     = useRef(null);
+  const silenceTimerRef = useRef(null);
+  const currentInterimRef = useRef('');
+  const lastCommittedRef  = useRef('');
 
   // Keep callback refs stable
   useEffect(() => { onPartialRef.current = onPartial; }, [onPartial]);
   useEffect(() => { onFinalRef.current   = onFinal;   }, [onFinal]);
+
+  const commitFinal = (text) => {
+    const clean = (text || currentInterimRef.current || '').trim();
+    if (!clean) return;
+    if (clean === lastCommittedRef.current) return;
+    lastCommittedRef.current = clean;
+    currentInterimRef.current = '';
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    console.log('[STT] Committing final text:', clean);
+    onFinalRef.current?.(clean);
+  };
 
   useEffect(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -43,6 +60,9 @@ export function useSpeechRecognition({
     const shouldRun = enabled && !isMuted && !isTTSPlaying;
 
     if (!shouldRun) {
+      if (currentInterimRef.current) {
+        commitFinal();
+      }
       // Stop any running instance
       if (recognitionRef.current) {
         recognitionRef.current._stopping = true;
@@ -50,6 +70,7 @@ export function useSpeechRecognition({
         recognitionRef.current = null;
       }
       if (restartRef.current) { clearTimeout(restartRef.current); restartRef.current = null; }
+      if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
       setIsListening(false);
       return;
     }
@@ -70,14 +91,31 @@ export function useSpeechRecognition({
 
     recognition.onresult = (e) => {
       let interim = '';
-      let final   = '';
+      let final = '';
       for (let i = e.resultIndex; i < e.results.length; i++) {
-        const t = e.results[i][0].transcript;
-        if (e.results[i].isFinal) final   += t;
-        else                       interim += t;
+        const item = e.results[i];
+        if (item && item[0]) {
+          const t = item[0].transcript;
+          if (item.isFinal) {
+            final += t;
+          } else {
+            interim += t;
+          }
+        }
       }
-      if (final.trim())   onFinalRef.current?.(final.trim());
-      else if (interim.trim()) onPartialRef.current?.(interim.trim());
+
+      if (final.trim()) {
+        commitFinal(final.trim());
+      } else if (interim.trim()) {
+        currentInterimRef.current = interim.trim();
+        onPartialRef.current?.(interim.trim());
+
+        // Reset silence timer: if speaker pauses for 1000ms, finalize the speech
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = setTimeout(() => {
+          commitFinal();
+        }, 1000);
+      }
     };
 
     recognition.onerror = (e) => {
@@ -90,6 +128,11 @@ export function useSpeechRecognition({
 
     recognition.onend = () => {
       setIsListening(false);
+      // Flush any lingering interim text
+      if (currentInterimRef.current) {
+        commitFinal();
+      }
+
       // Auto-restart unless we intentionally stopped
       if (!recognition._stopping && enabled && !isMuted && !isTTSPlaying) {
         restartRef.current = setTimeout(() => {
@@ -107,6 +150,7 @@ export function useSpeechRecognition({
     }
 
     return () => {
+      if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
       if (restartRef.current) { clearTimeout(restartRef.current); restartRef.current = null; }
       if (recognitionRef.current) {
         recognitionRef.current._stopping = true;
