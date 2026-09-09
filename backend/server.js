@@ -6,6 +6,7 @@ const cors = require('cors');
 const connectDB = require('./src/config/db');
 const meetingRoutes = require('./src/routes/meetingRoutes');
 const messageRoutes = require('./src/routes/messageRoutes');
+const translationRoutes = require('./src/routes/translationRoutes');
 const { initSocket } = require('./src/socket/socketHandler');
 
 const app = express();
@@ -36,6 +37,7 @@ initSocket(io);
 // API Routes
 app.use('/api/meetings', meetingRoutes);
 app.use('/api/messages', messageRoutes);
+app.use('/api/translation', translationRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

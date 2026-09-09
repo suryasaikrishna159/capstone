@@ -8,7 +8,10 @@
  * - Screen sharing events
  * - Real-time chat
  * - Host controls (remove-participant, end-meeting)
+ * - V3: Multilingual translation pipeline
  */
+
+const { initTranslationHandlers, cleanupTranslationUser } = require('./translationSocketHandler');
 
 // roomUsers: Map<meetingId, Map<socketId, userInfo>>
 const roomUsers = new Map();
@@ -19,6 +22,9 @@ const socketToRoom = new Map();
 const initSocket = (io) => {
   io.on('connection', (socket) => {
     console.log(`Socket connected: ${socket.id}`);
+
+    // ─── V3: Translation handlers ─────────────────────────────────────────────
+    initTranslationHandlers(io, socket, roomUsers);
 
     // ─── Join Room ───────────────────────────────────────────────────────────
     socket.on('join-room', ({ meetingId, userId, userName }) => {
@@ -226,6 +232,9 @@ function handleUserLeave(io, socket, meetingId) {
 
   socket.leave(meetingId);
   socketToRoom.delete(socket.id);
+
+  // V3: clean up translation state for this socket
+  cleanupTranslationUser(socket.id);
 
   if (room.size > 0) {
     broadcastParticipants(io, meetingId);

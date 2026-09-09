@@ -2,7 +2,13 @@ import React from 'react';
 import VideoTile from './VideoTile';
 import '../styles/components.css';
 
-function VideoGrid({ localStream, remoteStreams, localUser, hostId, isMuted, isCameraOff, isScreenSharing }) {
+function VideoGrid({
+  localStream, remoteStreams, localUser, hostId,
+  isMuted, isCameraOff, isScreenSharing,
+  localSpeaking,      // V3
+  speakingUsers,      // V3: { socketId: bool }
+  originalAudioEnabled, // V3
+}) {
   const remoteEntries = Object.entries(remoteStreams);
   const totalParticipants = 1 + remoteEntries.length;
 
@@ -25,6 +31,8 @@ function VideoGrid({ localStream, remoteStreams, localUser, hostId, isMuted, isC
         isLocal={true}
         isHost={localUser?.userId === hostId}
         iceState="connected"
+        isSpeaking={localSpeaking || false}
+        originalAudioEnabled={true}
       />
       {remoteEntries.map(([socketId, info]) => (
         <VideoTile
@@ -37,6 +45,8 @@ function VideoGrid({ localStream, remoteStreams, localUser, hostId, isMuted, isC
           isLocal={false}
           isHost={info.userId === hostId}
           iceState={info.iceState || 'checking'}
+          isSpeaking={speakingUsers?.[socketId] || false}
+          originalAudioEnabled={originalAudioEnabled}
         />
       ))}
     </div>

@@ -5,8 +5,10 @@ function MeetingControls({
   isMuted, isCameraOff, isScreenSharing,
   onToggleMute, onToggleCamera, onScreenShare, onStopScreenShare,
   onToggleChat, onToggleParticipants,
+  onToggleTranslation, onToggleTranscript,
   onLeaveMeeting, onEndMeeting,
-  isHost, chatOpen, participantsOpen,
+  isHost, chatOpen, participantsOpen, translationOpen, transcriptOpen,
+  translationEnabled,
   meetingId
 }) {
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
@@ -63,6 +65,30 @@ function MeetingControls({
             <span className="control-icon">🖥️</span>
             <span className="control-label">{isScreenSharing ? 'Stop Share' : 'Share'}</span>
           </button>
+
+          {/* V3: Translation button */}
+          <button
+            className={`control-btn ${(translationOpen || translationEnabled) ? 'control-btn-active' : ''}`}
+            onClick={onToggleTranslation}
+            title="Language & Translation settings"
+            aria-label="Translation"
+          >
+            <span className="control-icon">🌐</span>
+            <span className="control-label">{translationEnabled ? 'Translate' : 'Translate'}</span>
+          </button>
+
+          {/* V3: Transcript button — only show when translation is enabled */}
+          {translationEnabled && (
+            <button
+              className={`control-btn ${transcriptOpen ? 'control-btn-active' : ''}`}
+              onClick={onToggleTranscript}
+              title="Live transcript"
+              aria-label="Transcript"
+            >
+              <span className="control-icon">📝</span>
+              <span className="control-label">Transcript</span>
+            </button>
+          )}
 
           <button
             className={`control-btn ${chatOpen ? 'control-btn-active' : ''}`}
