@@ -8,8 +8,8 @@
 import { useRef, useState, useCallback } from 'react';
 
 // ─── Metered.ca TURN credentials (fetched at runtime) ────────────────────────
-const METERED_API_KEY = import.meta.env.VITE_METERED_API_KEY || '9e61710f50cea9c034ff77d7e8d8ca300d25';
-const METERED_DOMAIN  = import.meta.env.VITE_METERED_DOMAIN  || 'cpastoneproj.metered.live';
+const METERED_API_KEY = import.meta.env.VITE_METERED_API_KEY || 'FNdHvQ5c0uWsjp6X30Nnke-1UW39XMOJ3OfU-ztD7khOKR1O';
+const METERED_DOMAIN  = import.meta.env.VITE_METERED_DOMAIN  || 'capstoneproject.metered.live';
 
 const FALLBACK_ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
