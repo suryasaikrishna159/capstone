@@ -8,16 +8,19 @@
 import { useRef, useState, useCallback } from 'react';
 
 // ─── Metered.ca TURN credentials (fetched at runtime) ────────────────────────
-const METERED_API_KEY = '2kAW0is7PRU-QHeZEL9BE7NfOaHF9ePgEgXGnriONgQ4LRfS';
-const METERED_DOMAIN  = 'xyzasdf.metered.live';
+const METERED_API_KEY = import.meta.env.VITE_METERED_API_KEY || '9e61710f50cea9c034ff77d7e8d8ca300d25';
+const METERED_DOMAIN  = import.meta.env.VITE_METERED_DOMAIN  || 'cpastoneproj.metered.live';
 
+// Pre-configured working Metered TURN servers so WebRTC connects immediately
+// even before the dynamic fetch completes or if the API is unreachable:
 const FALLBACK_ICE_SERVERS = [
+  { urls: 'stun:stun.relay.metered.ca:80' },
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'turn:openrelay.metered.live:80',               username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.live:443',              username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turns:openrelay.metered.live:443',             username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:freestun.net:3479', username: 'free', credential: 'free' },
+  { urls: 'turn:global.relay.metered.ca:80',                username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
+  { urls: 'turn:global.relay.metered.ca:80?transport=tcp',  username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
+  { urls: 'turn:global.relay.metered.ca:443',               username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
+  { urls: 'turns:global.relay.metered.ca:443?transport=tcp', username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
 ];
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
