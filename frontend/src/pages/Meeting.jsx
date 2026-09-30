@@ -307,7 +307,10 @@ function Meeting() {
 
     s.on('disconnect', (reason) => { console.warn('[Meeting] Disconnected:', reason); setConnStatus('disconnected'); });
     s.on('reconnect', () => {
+      console.log('[Meeting] Reconnected — tearing down stale peer connections');
       setConnStatus('connected');
+      // Close all existing peer connections so that new offers create fresh PCs.
+      cleanup();
       s.emit('join-room', { meetingId, userId: userIdRef.current, userName: userNameRef.current });
       s.emit('language-updated', { meetingId, spokenLang: spokenLangRef.current, listeningLang: listeningLangRef.current });
     });

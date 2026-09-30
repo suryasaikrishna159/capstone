@@ -1,7 +1,7 @@
 /**
  * useWebRTC.js — Full-mesh WebRTC hook
  *
- * TURN server: Metered.ca (capstonelive.metered.live)
+ * TURN server: Metered.ca (cpastoneproj.metered.live) + OpenRelay free TURN
  * Credentials are fetched dynamically from Metered REST API before
  * any peer connection is created, so they are always fresh.
  */
@@ -11,16 +11,27 @@ import { useRef, useState, useCallback } from 'react';
 const METERED_API_KEY = import.meta.env.VITE_METERED_API_KEY || '9e61710f50cea9c034ff77d7e8d8ca300d25';
 const METERED_DOMAIN  = import.meta.env.VITE_METERED_DOMAIN  || 'cpastoneproj.metered.live';
 
-// Pre-configured working Metered TURN servers so WebRTC connects immediately
-// even before the dynamic fetch completes or if the API is unreachable:
+// Multiple TURN providers — if one fails, browser automatically tries the next.
+// OpenRelay is a fully-free TURN service with no quota.
 const FALLBACK_ICE_SERVERS = [
-  { urls: 'stun:stun.relay.metered.ca:80' },
+  // ── STUN ──────────────────────────────────────────────────────────────────
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'turn:global.relay.metered.ca:80',                username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
-  { urls: 'turn:global.relay.metered.ca:80?transport=tcp',  username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
-  { urls: 'turn:global.relay.metered.ca:443',               username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun.relay.metered.ca:80' },
+  { urls: 'stun:openrelay.metered.ca:80' },
+
+  // ── Metered TURN (cpastoneproj.metered.live) ───────────────────────────
+  { urls: 'turn:global.relay.metered.ca:80',                 username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
+  { urls: 'turn:global.relay.metered.ca:80?transport=tcp',   username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
+  { urls: 'turn:global.relay.metered.ca:443',                username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
   { urls: 'turns:global.relay.metered.ca:443?transport=tcp', username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
+
+  // ── OpenRelay free TURN (no quota, no account needed) ─────────────────
+  { urls: 'turn:openrelay.metered.ca:80',                username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443',               username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:80?transport=tcp',  username: 'openrelayproject', credential: 'openrelayproject' },
 ];
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
@@ -32,6 +43,9 @@ export function useWebRTC({ socket, meetingId }) {
   const originalVideoTrackRef = useRef(null);
   const iceServersRef         = useRef(FALLBACK_ICE_SERVERS);
   const iceRestartCountRef    = useRef({});
+  // Tracks ICE state per socketId BEFORE the remoteStreams entry is created.
+  // Fixes the race where oniceconnectionstatechange fires before ontrack.
+  const peerIceStatesRef      = useRef({});
 
   const [localStream,     setLocalStream]     = useState(null);
   const [remoteStreams,   setRemoteStreams]    = useState({});
@@ -50,8 +64,16 @@ export function useWebRTC({ socket, meetingId }) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const servers = await res.json();
       if (Array.isArray(servers) && servers.length > 0) {
-        iceServersRef.current = servers;
-        console.log('[WebRTC] TURN credentials ready —', servers.length, 'ICE servers');
+        // Merge Metered dynamic credentials with OpenRelay fallbacks so we always
+        // have multiple TURN providers available.
+        const openRelay = FALLBACK_ICE_SERVERS.filter(s =>
+          typeof s.urls === 'string' && s.urls.includes('openrelay')
+        );
+        const googleStun = FALLBACK_ICE_SERVERS.filter(s =>
+          typeof s.urls === 'string' && s.urls.includes('google')
+        );
+        iceServersRef.current = [...googleStun, ...servers, ...openRelay];
+        console.log('[WebRTC] TURN credentials ready —', iceServersRef.current.length, 'ICE servers');
       } else {
         throw new Error('Empty response');
       }
@@ -111,8 +133,8 @@ export function useWebRTC({ socket, meetingId }) {
     const pc = new RTCPeerConnection({
       iceServers: iceServersRef.current,
       iceCandidatePoolSize: 10,
-      bundlePolicy: 'max-bundle',
-      rtcpMuxPolicy: 'require',
+      // Removed bundlePolicy and rtcpMuxPolicy — browser defaults are more
+      // compatible across networks and firewall configurations.
     });
 
     peerConnectionsRef.current[socketId] = pc;
@@ -128,31 +150,51 @@ export function useWebRTC({ socket, meetingId }) {
 
     // Send ICE candidate to remote peer via signaling server
     pc.onicecandidate = ({ candidate }) => {
-      if (candidate) socket.emit('ice-candidate', { to: socketId, candidate });
+      if (candidate) {
+        console.log(`[WebRTC] Local ICE candidate for ${socketId}: ${candidate.type}`);
+        socket.emit('ice-candidate', { to: socketId, candidate });
+      }
+    };
+
+    // Log ICE gathering state
+    pc.onicegatheringstatechange = () => {
+      console.log(`[WebRTC] PC[${socketId}] ICE gathering: ${pc.iceGatheringState}`);
     };
 
     // Remote track arrived — update UI with stream.
-    // We create a NEW MediaStream each time so that even when the stream
-    // reference from WebRTC is the same object, React sees a new reference
-    // and VideoTile's useEffect([stream]) re-runs to attach the audio element.
+    // Creates a NEW MediaStream on every track event so React's useEffect([stream])
+    // always re-runs in VideoTile, properly re-attaching the audio element.
+    //
+    // RACE FIX: oniceconnectionstatechange can fire before ontrack. We store
+    // the ICE state in peerIceStatesRef so ontrack can read the correct value.
     pc.ontrack = ({ streams, track }) => {
       const srcStream = (streams && streams[0]) ? streams[0] : new MediaStream([track]);
-      // Always build a fresh MediaStream from all current tracks
       const freshStream = new MediaStream(srcStream.getTracks());
-      console.log(`[WebRTC] Got track (${track.kind}) from ${socketId} (${userInfo.userName})`);
+      console.log(`[WebRTC] ✅ Got ${track.kind} track from ${socketId} (${userInfo.userName})`);
+
       setRemoteStreams(prev => {
         const existing = prev[socketId] || {};
+
+        // Resolve correct ICE state: prefer already-set 'connected'/'completed',
+        // then fall back to peerIceStatesRef (set by oniceconnectionstatechange),
+        // then current PC state, then 'checking'.
+        const goodStates = new Set(['connected', 'completed']);
+        const savedState = peerIceStatesRef.current[socketId];
+        const iceState   = goodStates.has(existing.iceState)  ? existing.iceState
+                         : goodStates.has(savedState)          ? savedState
+                         : pc.iceConnectionState               || 'checking';
+
         return {
           ...prev,
           [socketId]: {
             ...existing,
             stream: freshStream,
-            userId: userInfo.userId || socketId,
-            userName: userInfo.userName || 'Participant',
-            isMuted: existing.isMuted !== undefined ? existing.isMuted : (userInfo.isMuted || false),
-            isCameraOff: existing.isCameraOff !== undefined ? existing.isCameraOff : (userInfo.isCameraOff || false),
-            isScreenSharing: existing.isScreenSharing !== undefined ? existing.isScreenSharing : (userInfo.isScreenSharing || false),
-            iceState: existing.iceState || 'checking'
+            userId:         userInfo.userId   || socketId,
+            userName:       userInfo.userName || 'Participant',
+            isMuted:        existing.isMuted         !== undefined ? existing.isMuted         : (userInfo.isMuted         || false),
+            isCameraOff:    existing.isCameraOff     !== undefined ? existing.isCameraOff     : (userInfo.isCameraOff     || false),
+            isScreenSharing:existing.isScreenSharing !== undefined ? existing.isScreenSharing : (userInfo.isScreenSharing || false),
+            iceState,
           }
         };
       });
@@ -163,13 +205,16 @@ export function useWebRTC({ socket, meetingId }) {
       const state = pc.iceConnectionState;
       console.log(`[WebRTC] PC[${socketId}] ICE: ${state}`);
 
+      // Always save to ref FIRST — ontrack reads this to fix the race condition
+      peerIceStatesRef.current[socketId] = state;
+
       setRemoteStreams(prev => {
-        if (!prev[socketId]) return prev;
+        if (!prev[socketId]) return prev; // ontrack hasn't fired yet; state saved in ref above
         return { ...prev, [socketId]: { ...prev[socketId], iceState: state } };
       });
 
       if (state === 'connected' || state === 'completed') {
-        console.log(`[WebRTC] ✅ Connected to ${userInfo.userName}`);
+        console.log(`[WebRTC] ✅ ICE connected to ${userInfo.userName}`);
         iceRestartCountRef.current[socketId] = 0;
         return;
       }
@@ -230,7 +275,7 @@ export function useWebRTC({ socket, meetingId }) {
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
       if (pendingCandidatesRef.current[from]) {
         for (const c of pendingCandidatesRef.current[from]) {
-          try { await pc.addIceCandidate(c); } catch (_) {}
+          try { await pc.addIceCandidate(c); } catch (e) { console.warn('[WebRTC] Pending ICE add failed:', e.message); }
         }
         delete pendingCandidatesRef.current[from];
       }
@@ -252,7 +297,7 @@ export function useWebRTC({ socket, meetingId }) {
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
         if (pendingCandidatesRef.current[from]) {
           for (const c of pendingCandidatesRef.current[from]) {
-            try { await pc.addIceCandidate(c); } catch (_) {}
+            try { await pc.addIceCandidate(c); } catch (e) { console.warn('[WebRTC] Pending ICE add failed:', e.message); }
           }
           delete pendingCandidatesRef.current[from];
         }
@@ -268,7 +313,11 @@ export function useWebRTC({ socket, meetingId }) {
     const pc = peerConnectionsRef.current[from];
     const ice = new RTCIceCandidate(candidate);
     if (pc && pc.remoteDescription?.type) {
-      try { await pc.addIceCandidate(ice); } catch (_) {}
+      try {
+        await pc.addIceCandidate(ice);
+      } catch (err) {
+        console.warn('[WebRTC] addIceCandidate failed:', err.message);
+      }
     } else {
       if (!pendingCandidatesRef.current[from]) pendingCandidatesRef.current[from] = [];
       pendingCandidatesRef.current[from].push(ice);
@@ -281,6 +330,7 @@ export function useWebRTC({ socket, meetingId }) {
     if (pc) { pc.close(); delete peerConnectionsRef.current[socketId]; }
     delete pendingCandidatesRef.current[socketId];
     delete iceRestartCountRef.current[socketId];
+    delete peerIceStatesRef.current[socketId];
     setRemoteStreams(prev => { const n = { ...prev }; delete n[socketId]; return n; });
   }, []);
 
@@ -360,6 +410,7 @@ export function useWebRTC({ socket, meetingId }) {
     peerConnectionsRef.current = {};
     pendingCandidatesRef.current = {};
     iceRestartCountRef.current = {};
+    peerIceStatesRef.current = {};
     setLocalStream(null);
     setRemoteStreams({});
     setIsScreenSharing(false);
