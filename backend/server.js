@@ -15,9 +15,27 @@ const server = http.createServer(app);
 // Connect to MongoDB
 connectDB();
 
-// CORS configuration
+// CORS configuration — allow Netlify frontend + local dev
+const ALLOWED_ORIGINS = [
+  'https://meet-space-capstone.netlify.app',
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'https://footwear-tightly-gauze.ngrok-free.dev',
+];
+if (process.env.CLIENT_URL && !ALLOWED_ORIGINS.includes(process.env.CLIENT_URL)) {
+  ALLOWED_ORIGINS.push(process.env.CLIENT_URL);
+}
+
 const corsOptions = {
-  origin: process.env.CLIENT_URL || 'http://localhost:5174' || 'https://footwear-tightly-gauze.ngrok-free.dev',
+  origin: (origin, callback) => {
+    // Allow requests with no origin (e.g., Render health checks, curl)
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.warn('[CORS] Blocked origin:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true

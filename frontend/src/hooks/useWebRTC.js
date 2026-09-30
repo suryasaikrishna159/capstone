@@ -131,23 +131,31 @@ export function useWebRTC({ socket, meetingId }) {
       if (candidate) socket.emit('ice-candidate', { to: socketId, candidate });
     };
 
-    // Remote track arrived — update UI with stream
-    pc.ontrack = ({ streams }) => {
-      if (streams && streams[0]) {
-        console.log(`[WebRTC] Got remote stream from ${socketId} (${userInfo.userName})`);
-        setRemoteStreams(prev => ({
+    // Remote track arrived — update UI with stream.
+    // We create a NEW MediaStream each time so that even when the stream
+    // reference from WebRTC is the same object, React sees a new reference
+    // and VideoTile's useEffect([stream]) re-runs to attach the audio element.
+    pc.ontrack = ({ streams, track }) => {
+      const srcStream = (streams && streams[0]) ? streams[0] : new MediaStream([track]);
+      // Always build a fresh MediaStream from all current tracks
+      const freshStream = new MediaStream(srcStream.getTracks());
+      console.log(`[WebRTC] Got track (${track.kind}) from ${socketId} (${userInfo.userName})`);
+      setRemoteStreams(prev => {
+        const existing = prev[socketId] || {};
+        return {
           ...prev,
           [socketId]: {
-            stream: streams[0],
+            ...existing,
+            stream: freshStream,
             userId: userInfo.userId || socketId,
             userName: userInfo.userName || 'Participant',
-            isMuted: userInfo.isMuted || false,
-            isCameraOff: userInfo.isCameraOff || false,
-            isScreenSharing: userInfo.isScreenSharing || false,
-            iceState: 'checking'
+            isMuted: existing.isMuted !== undefined ? existing.isMuted : (userInfo.isMuted || false),
+            isCameraOff: existing.isCameraOff !== undefined ? existing.isCameraOff : (userInfo.isCameraOff || false),
+            isScreenSharing: existing.isScreenSharing !== undefined ? existing.isScreenSharing : (userInfo.isScreenSharing || false),
+            iceState: existing.iceState || 'checking'
           }
-        }));
-      }
+        };
+      });
     };
 
     // Track ICE state changes

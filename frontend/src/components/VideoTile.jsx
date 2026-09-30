@@ -30,13 +30,22 @@ function VideoTile({
     return () => clearTimeout(t);
   }, [stream]);
 
-  // Separate audio element for remote participants
+  // Separate audio element for remote participants.
+  // Also listens to addtrack in case audio arrives after the initial render.
   useEffect(() => {
     if (isLocal || !stream || !audioRef.current) return;
-    const tracks = stream.getAudioTracks();
-    if (tracks.length === 0) return;
-    audioRef.current.srcObject = new MediaStream(tracks);
-    audioRef.current.play().catch(() => {});
+
+    const attachAudio = () => {
+      const tracks = stream.getAudioTracks();
+      if (tracks.length > 0 && audioRef.current) {
+        audioRef.current.srcObject = new MediaStream(tracks);
+        audioRef.current.play().catch(() => {});
+      }
+    };
+
+    attachAudio();
+    stream.addEventListener('addtrack', attachAudio);
+    return () => stream.removeEventListener('addtrack', attachAudio);
   }, [stream, isLocal]);
 
   // Control original audio volume based on V3 setting
