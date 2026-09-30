@@ -12,17 +12,20 @@ import { useRef, useState, useCallback } from 'react';
 const BACKEND_API = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
 // Comprehensive fallback used only when the backend /api/ice-servers call fails.
-// OpenRelay (no quota) is primary; Metered is secondary.
+// OpenRelay (no quota) is primary; old Metered credentials are secondary.
 const FALLBACK_ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:openrelay.metered.ca:80' },
-  // OpenRelay — free, no quota
-  { urls: 'turn:openrelay.metered.ca:80',                username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443',               username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:80?transport=tcp',  username: 'openrelayproject', credential: 'openrelayproject' },
-  // Metered (quota-based backup)
+  // OpenRelay UDP TURN
+  { urls: 'turn:openrelay.metered.ca:80',                 username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443',                username: 'openrelayproject', credential: 'openrelayproject' },
+  // OpenRelay TCP TURN (bypasses UDP-blocking firewalls)
+  { urls: 'turn:openrelay.metered.ca:80?transport=tcp',   username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443?transport=tcp',  username: 'openrelayproject', credential: 'openrelayproject' },
+  // OpenRelay TLS TURN — port 443 TLS, passes through all firewalls
+  { urls: 'turns:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+  // Metered static credentials (cpastoneproj backup)
   { urls: 'stun:stun.relay.metered.ca:80' },
   { urls: 'turn:global.relay.metered.ca:80',                 username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
   { urls: 'turn:global.relay.metered.ca:80?transport=tcp',   username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
