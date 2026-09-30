@@ -52,10 +52,13 @@ const io = new Server(server, {
 // Initialize socket handler
 initSocket(io);
 
+const iceServersRoute = require('./src/routes/iceServersRoute');
+
 // API Routes
 app.use('/api/meetings', meetingRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/translation', translationRoutes);
+app.use('/api/ice-servers', iceServersRoute);
 
 // Health check
 app.get('/api/health', (req, res) => {

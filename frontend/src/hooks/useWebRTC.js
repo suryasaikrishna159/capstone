@@ -1,37 +1,33 @@
 /**
  * useWebRTC.js — Full-mesh WebRTC hook
  *
- * TURN server: Metered.ca (cpastoneproj.metered.live) + OpenRelay free TURN
- * Credentials are fetched dynamically from Metered REST API before
- * any peer connection is created, so they are always fresh.
+ * ICE/TURN servers are fetched from our own backend (/api/ice-servers) which
+ * combines Metered dynamic credentials with OpenRelay free TURN. This keeps
+ * the API key off the frontend bundle and allows changing TURN providers via
+ * Render environment variables without a frontend redeploy.
  */
 import { useRef, useState, useCallback } from 'react';
 
-// ─── Metered.ca TURN credentials (fetched at runtime) ────────────────────────
-const METERED_API_KEY = import.meta.env.VITE_METERED_API_KEY || '9e61710f50cea9c034ff77d7e8d8ca300d25';
-const METERED_DOMAIN  = import.meta.env.VITE_METERED_DOMAIN  || 'cpastoneproj.metered.live';
+// Backend URL — resolves correctly for both local dev and production (Netlify → Render)
+const BACKEND_API = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
-// Multiple TURN providers — if one fails, browser automatically tries the next.
-// OpenRelay is a fully-free TURN service with no quota.
+// Comprehensive fallback used only when the backend /api/ice-servers call fails.
+// OpenRelay (no quota) is primary; Metered is secondary.
 const FALLBACK_ICE_SERVERS = [
-  // ── STUN ──────────────────────────────────────────────────────────────────
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun.relay.metered.ca:80' },
   { urls: 'stun:openrelay.metered.ca:80' },
-
-  // ── Metered TURN (cpastoneproj.metered.live) ───────────────────────────
-  { urls: 'turn:global.relay.metered.ca:80',                 username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
-  { urls: 'turn:global.relay.metered.ca:80?transport=tcp',   username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
-  { urls: 'turn:global.relay.metered.ca:443',                username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
-  { urls: 'turns:global.relay.metered.ca:443?transport=tcp', username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
-
-  // ── OpenRelay free TURN (no quota, no account needed) ─────────────────
+  // OpenRelay — free, no quota
   { urls: 'turn:openrelay.metered.ca:80',                username: 'openrelayproject', credential: 'openrelayproject' },
   { urls: 'turn:openrelay.metered.ca:443',               username: 'openrelayproject', credential: 'openrelayproject' },
   { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
   { urls: 'turn:openrelay.metered.ca:80?transport=tcp',  username: 'openrelayproject', credential: 'openrelayproject' },
+  // Metered (quota-based backup)
+  { urls: 'stun:stun.relay.metered.ca:80' },
+  { urls: 'turn:global.relay.metered.ca:80',                 username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
+  { urls: 'turn:global.relay.metered.ca:80?transport=tcp',   username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
+  { urls: 'turn:global.relay.metered.ca:443',                username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
+  { urls: 'turns:global.relay.metered.ca:443?transport=tcp', username: 'cf415c4afb57e187396489cf', credential: 'kDLev5KEqR5BbYxr' },
 ];
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
@@ -54,31 +50,22 @@ export function useWebRTC({ socket, meetingId }) {
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [mediaError,      setMediaError]      = useState(null);
 
-  // ── Fetch TURN credentials from Metered REST API ────────────────────────────
+  // ── Fetch ICE/TURN servers from backend ────────────────────────────────────
   const fetchTurnCredentials = useCallback(async () => {
     try {
-      console.log('[WebRTC] Fetching TURN credentials from Metered...');
-      const res = await fetch(
-        `https://${METERED_DOMAIN}/api/v1/turn/credentials?apiKey=${METERED_API_KEY}`
-      );
+      console.log('[WebRTC] Fetching ICE servers from backend...');
+      const res = await fetch(`${BACKEND_API}/ice-servers`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const servers = await res.json();
+      const data = await res.json();
+      const servers = data.iceServers || data; // support both {iceServers:[]} and []
       if (Array.isArray(servers) && servers.length > 0) {
-        // Merge Metered dynamic credentials with OpenRelay fallbacks so we always
-        // have multiple TURN providers available.
-        const openRelay = FALLBACK_ICE_SERVERS.filter(s =>
-          typeof s.urls === 'string' && s.urls.includes('openrelay')
-        );
-        const googleStun = FALLBACK_ICE_SERVERS.filter(s =>
-          typeof s.urls === 'string' && s.urls.includes('google')
-        );
-        iceServersRef.current = [...googleStun, ...servers, ...openRelay];
-        console.log('[WebRTC] TURN credentials ready —', iceServersRef.current.length, 'ICE servers');
+        iceServersRef.current = servers;
+        console.log('[WebRTC] ICE servers ready —', servers.length, 'servers from backend');
       } else {
         throw new Error('Empty response');
       }
     } catch (err) {
-      console.warn('[WebRTC] TURN fetch failed, using fallback servers:', err.message);
+      console.warn('[WebRTC] Backend ICE fetch failed, using built-in fallback:', err.message);
       iceServersRef.current = FALLBACK_ICE_SERVERS;
     }
   }, []);
